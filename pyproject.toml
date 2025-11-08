@@ -13,7 +13,9 @@ dependencies = [
     "numpy>=2.0.0",
     "scipy>=1.14.0",
     "matplotlib>=3.9.0",
-    "pygame>=2.6.0"
+    "pygame>=2.6.0",
+    "Flask>=2.3.0"
+    ,"Pillow>=10.0.0"
 ]
 
 [project.scripts]

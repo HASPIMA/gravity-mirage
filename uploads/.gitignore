@@ -1,0 +1,6 @@
+# Ignore all files in this uploads directory (uploaded images, runtime files)
+*
+
+# But keep the .gitignore itself and an optional .gitkeep so the directory can be tracked
+!.gitignore
+!.gitkeep
