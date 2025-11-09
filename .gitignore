@@ -210,6 +210,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Uploads folder
+uploads/*
+
 # --------------------------------------------------
 # Global/VisualStudioCode.gitignore
 # --------------------------------------------------

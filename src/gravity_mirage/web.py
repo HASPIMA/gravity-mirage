@@ -167,86 +167,182 @@ def index():
     options_html = ''.join([f'<option value="{i}">{i}</option>' for i in images])
 
     pre = """
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>Gravity Mirage — Upload Images</title>
-      </head>
-      <body>
-        <h1>Upload images to be distorted by the black hole</h1>
-        <form method="post" action="/upload" enctype="multipart/form-data">
-          <input type="file" name="file" accept="image/*" />
-          <input type="submit" value="Upload" />
-        </form>
-        <h2>Uploaded images</h2>
-        <div>
-          <ul style="padding:0; margin:0;">
-    """
+        <!doctype html>
+        <html>
+            <head>
+                <meta charset="utf-8" />
+                <title>Gravity Mirage — Upload & Preview</title>
+                        <style>
+                            :root{ --bg:#0f1720; --card:#0b1320; --muted:#9aa6b2; --accent:#6ee7b7; --panel: #0b1220 }
+                            body{ margin:0; font-family:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:linear-gradient(180deg,#071025,#0b1220); color:#e6eef6; display:flex; align-items:center; justify-content:center; min-height:100vh; }
+                            /* Center the app and give a comfortable max width for 16:9 displays */
+                                /* wider center column for large 16:9 (1920px) screens */
+                                .app{ display:grid; grid-template-columns:1280px 1fr; gap:28px; padding:28px; box-sizing:border-box; max-width:1800px; margin:0; align-items:start; }
+                                .sidebar{ background:rgba(255,255,255,0.02); border-radius:10px; padding:18px; overflow:auto; box-shadow: 0 6px 18px rgba(2,6,23,0.6); min-width:360px; max-width:1280px; }
+                            /* Main column becomes a vertical flex so preview can expand nicely */
+                            .main{ padding:14px; border-radius:10px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
+            h1{ margin:0 0 12px 0; font-size:18px; text-align:center; }
+                    .uploader{ display:flex; gap:8px; align-items:center; }
+                    .uploader input[type=file]{ color:var(--muted); }
+                      .uploads-list{ margin-top:12px; display:flex; flex-wrap:wrap; gap:12px; justify-content:center; }
+                      .thumb{ width:160px; background:var(--card); padding:10px; border-radius:8px; text-align:center; cursor:pointer; margin:0 auto; }
+                      .thumb img{ width:100%; height:96px; object-fit:cover; border-radius:6px; display:block; }
+                    .controls{ margin-top:14px; background:rgba(255,255,255,0.015); padding:10px; border-radius:8px; text-align:center; }
+                    label{ font-size:13px; color:var(--muted); display:block; margin-bottom:6px; }
+                    .range-wrap{ display:flex; align-items:center; gap:10px; justify-content:center; }
+                    input[type=range]{ flex:1; }
+                    .value{ width:64px; text-align:right; color:var(--accent); font-weight:600 }
+                      .preview-card{ background:rgba(255,255,255,0.02); border-radius:10px; padding:12px; flex:1 1 auto; box-shadow: 0 6px 30px rgba(2,6,23,0.6); display:flex; flex-direction:column; }
+                      /* previewContainer fills available space and keeps aspect nicely */
+                      #previewContainer{ width:100%; flex:1 1 auto; display:flex; align-items:center; justify-content:center; background:#02050a; border-radius:8px; overflow:hidden; }
+                      #previewImg{ max-width:100%; max-height:100%; display:block; margin:0 auto; }
+                    .small{ font-size:12px; color:var(--muted); }
+                    /* center the Black hole preview heading in the sidebar */
+                    .sidebar h2{ text-align:center; margin-top:12px; }
+                    .topbar{ display:flex; justify-content:center; align-items:center; gap:12px; margin-bottom:12px; }
+                    /* center form elements in sidebar */
+                    .sidebar form{ margin:0 auto; }
+                    .controls select, .controls input[type=range]{ margin:0 auto; }
+                    /* Unified larger Upload-like button for chooser + upload (apply globally) */
+                    .control-button { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:10px 14px; min-height:36px; line-height:1; font-size:14px; font-weight:600; border-radius:8px; background:#2b3137; color:inherit; border:1px solid rgba(255,255,255,0.06); cursor:pointer; box-shadow: 0 2px 6px rgba(2,6,23,0.45); transition: background 120ms, border-color 120ms, transform 80ms; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 0 auto; }
+                    .control-button:hover { background:#353b42; border-color:rgba(255,255,255,0.09); transform:translateY(-1px); }
+                    .control-button:active { transform:translateY(0); }
+                    .control-button:focus { outline:2px solid rgba(110,231,183,0.12); outline-offset:2px; }
+                    .control-button[disabled], .control-button:disabled { opacity:0.55; cursor:not-allowed; transform:none; }
+                </style>
+            </head>
+            <body>
+                <div class="app">
+                    <aside class="sidebar">
+                        <h1>Uploads</h1>
+                        <div class="uploader">
+                            <form id="uploadForm" method="post" action="/upload" enctype="multipart/form-data" style="display:flex; gap:8px; align-items:center; width:100%; flex-wrap:nowrap;">
+                                <!-- Hidden native file input; label acts as the visible chooser button -->
+                                <input id="fileInput" type="file" name="file" accept="image/*" style="display:none" />
+                                <button type="button" id="chooseBtn" class="control-button" onclick="document.getElementById('fileInput').click();">Choose file</button>
+                                <div id="fileName" class="small" style="flex:1; text-align:left; margin-left:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">No file chosen</div>
+                                <input id="uploadSubmit" class="control-button" type="submit" value="Upload" style="margin-left:8px;" />
+                            </form>
+                        </div>
+                        <div class="uploads-list" id="uploadsList">
+                            <ul style="padding:0; margin:0; display:flex; flex-wrap:wrap; gap:8px;">
+        """
 
     mid = """
-          </ul>
-        </div>
+                            </ul>
+                        </div>
 
-        <hr />
-        <h2>Black hole preview</h2>
-        <div>
-          <label for="imageSelect">Image:</label>
-          <select id="imageSelect">
+                        <hr />
+                        <h2>Black hole preview</h2>
+                        <div class="controls">
+                            <div style="display:inline-block; margin-right:12px; vertical-align:middle;">
+                                    <label for="imageSelect" style="display:block; margin-bottom:4px;">Image</label>
+                                    <select id="imageSelect" style="vertical-align:middle; padding:6px; border-radius:6px;">
     """
 
     mid2 = """
-          </select>
-          <label for="massInput">Mass (M_sun):</label>
-          <input id="massInput" type="number" value="10" step="1" style="width:80px;" />
-                    <label for="scaleInput">Scale (Rs across image radius):</label>
-                    <input id="scaleInput" type="number" value="100" step="10" style="width:80px;" />
-                    <label for="methodSelect">Method:</label>
-                    <select id="methodSelect">
-                        <option value="weak">Weak-field (fast)</option>
-                        <option value="geodesic">Geodesic (slower, more accurate)</option>
                     </select>
-          <button id="renderBtn">Render preview</button>
-        </div>
-        <div style="margin-top:12px;">
-          <img id="previewImg" src="" style="max-width:100%; border:1px solid #ccc; background:#000;" />
-        </div>
+                    </div>
+                    <div style="display:inline-block; margin-left:12px; vertical-align:middle;">
+                        <label for="massSlider" style="display:block; margin-bottom:4px;">Mass (M_sun)</label>
+                        <input id="massSlider" type="range" min="1" max="1000000" step="1" value="10" style="vertical-align:middle; width:240px;" />
+                        <div class="value" id="massValue" style="display:inline-block; width:70px; text-align:right;">10</div>
+                    </div>
+                    <div style="display:inline-block; margin-left:12px; vertical-align:middle;">
+                        <label for="scaleSlider">Scale (Rs across image radius):</label>
+                        <input id="scaleSlider" type="range" min="1" max="20" step="1" value="5" style="vertical-align:middle; width:240px;" />
+                        <span id="scaleValue" style="display:inline-block; width:70px; text-align:right;">100</span>
+                    </div>
+                    <div style="display:inline-block; margin-left:12px; vertical-align:middle;">
+                        <label for="methodSelect" style="display:block; margin-bottom:4px;">Method:</label>
+                        <select id="methodSelect" style="vertical-align:middle; padding:6px; border-radius:6px;">
+                            <option value="weak">Weak-field (fast)</option>
+                            <option value="geodesic">Geodesic (slower, more accurate)</option>
+                        </select>
+                    </div>
+                    <!-- render button removed: sliders and selection auto-trigger preview -->
+                </div>
+                <div style="margin-top:12px;">
+                    <img id="previewImg" src="" style="max-width:100%; border:1px solid #ccc; background:#000;" />
+                </div>
 
-        <script>
-          function buildPreviewUrl(name){
-            var mass = document.getElementById('massInput').value || 10;
-            var scale = document.getElementById('scaleInput').value || 100;
+                <script>
+                    function buildPreviewUrl(name){
+                        var mass = document.getElementById('massSlider').value || 10;
+                        var scale = document.getElementById('scaleSlider').value || 100;
                         var width = 512;
                         var method = document.getElementById('methodSelect') ? document.getElementById('methodSelect').value : 'weak';
                         return '/preview/' + encodeURIComponent(name)
-                            + '?mass=' + encodeURIComponent(mass)
-                            + '&scale=' + encodeURIComponent(scale)
-                            + '&width=' + encodeURIComponent(width)
-                            + '&method=' + encodeURIComponent(method);
-          }
-          function setPreview(name){
-            document.getElementById('imageSelect').value = name;
-            document.getElementById('previewImg').src = buildPreviewUrl(name);
-          }
-          document.addEventListener('DOMContentLoaded', function(){
-            var btn = document.getElementById('renderBtn');
-            if(btn){
-              btn.addEventListener('click', function(){
-                var sel = document.getElementById('imageSelect');
-                var name = sel.value;
-                if(name) setPreview(name);
-              });
-            }
-            // initialize preview with first image if present
-            var sel = document.getElementById('imageSelect');
-            if(sel && sel.options.length>0){
-              var first = sel.options[0].value;
-              document.getElementById('previewImg').src = buildPreviewUrl(first);
-            }
-          });
-        </script>
-    </html>
-    """
+                                + '?mass=' + encodeURIComponent(mass)
+                                + '&scale=' + encodeURIComponent(scale)
+                                + '&width=' + encodeURIComponent(width)
+                                + '&method=' + encodeURIComponent(method);
+                    }
+                    function setPreview(name){
+                        document.getElementById('imageSelect').value = name;
+                        document.getElementById('previewImg').src = buildPreviewUrl(name);
+                    }
+                    document.addEventListener('DOMContentLoaded', function(){
+                        // When the selection changes, auto-render the selected image
+                        var imageSelect = document.getElementById('imageSelect');
+                        if(imageSelect){
+                            imageSelect.addEventListener('change', function(){ var name = imageSelect.value; if(name) setPreview(name); });
+                        }
+                        // Wire sliders to display current integer value
+                        var massSlider = document.getElementById('massSlider');
+                        var massValue = document.getElementById('massValue');
+                        if(massSlider && massValue){
+                            massValue.textContent = massSlider.value;
+                            massSlider.addEventListener('input', function(){ massValue.textContent = massSlider.value; scheduleRender(); });
+                        }
+                        var scaleSlider = document.getElementById('scaleSlider');
+                        var scaleValue = document.getElementById('scaleValue');
+                        if(scaleSlider && scaleValue){
+                            scaleValue.textContent = scaleSlider.value;
+                            scaleSlider.addEventListener('input', function(){ scaleValue.textContent = scaleSlider.value; scheduleRender(); });
+                        }
+
+                        // Debounced auto-render when sliders change to avoid spamming render requests
+                        var _debounceTimer = null;
+                        function scheduleRender(){
+                            if(_debounceTimer) clearTimeout(_debounceTimer);
+                            var sel = document.getElementById('imageSelect');
+                            var name = sel ? sel.value : null;
+                            _debounceTimer = setTimeout(function(){ if(name) setPreview(name); }, 300);
+                        }
+
+                        // File chooser preview: keep Upload button next to filename and update text dynamically
+                        try{
+                            var fileInput = document.getElementById('fileInput');
+                            var fileName = document.getElementById('fileName');
+                            var uploadSubmit = document.getElementById('uploadSubmit');
+                            var chooseBtn = document.getElementById('chooseBtn');
+                            var defaultText = (navigator.language && navigator.language.startsWith && navigator.language.startsWith('es')) ? 'Ningún archivo seleccionado' : 'No file chosen';
+                            if(fileName) fileName.textContent = defaultText;
+                            if(fileInput){
+                                fileInput.addEventListener('change', function(){
+                                    if(fileInput.files && fileInput.files.length>0){
+                                        fileName.textContent = fileInput.files[0].name;
+                                        if(uploadSubmit) uploadSubmit.disabled = false;
+                                    }else{
+                                        fileName.textContent = defaultText;
+                                        if(uploadSubmit) uploadSubmit.disabled = false;
+                                    }
+                                });
+                            }
+                            // Clicking the visible choose button triggers the hidden input (label[for] does this automatically)
+                        }catch(e){ /* ignore if elements missing */ }
+
+                        // initialize preview with first image if present
+                        var sel = document.getElementById('imageSelect');
+                        if(sel && sel.options.length>0){
+                            var first = sel.options[0].value;
+                            document.getElementById('previewImg').src = buildPreviewUrl(first);
+                        }
+                    });
+                </script>
+        </html>
+        """
 
     html = pre + str(items_html) + mid + options_html + mid2
     return html
@@ -259,18 +355,31 @@ def upload():
     file = request.files['file']
     if file.filename == '':
         return redirect(url_for('index'))
+    # Save uploaded files under a neutral name so original names are not preserved.
+    # Naming pattern: image<N><ext> where N is an incrementing integer starting at 1
+    orig = secure_filename(str(file.filename))
+    ext = Path(orig).suffix.lower()
+    if not ext:
+        # fallback if no extension provided
+        ext = '.png'
 
-    filename = secure_filename(str(file.filename))
-    dest = Path(app.config['UPLOAD_FOLDER']) / filename
-    # If file with same name exists, append a short suffix
-    if dest.exists():
-        base = dest.stem
-        suf = dest.suffix
-        i = 1
-        while dest.exists():
-            dest = Path(app.config['UPLOAD_FOLDER']) / f"{base}_{i}{suf}"
-            i += 1
+    # find existing files starting with 'image' and extract numeric suffixes
+    existing = [p.name for p in Path(app.config['UPLOAD_FOLDER']).iterdir() if p.is_file()]
+    max_n = 0
+    for name in existing:
+        stem = Path(name).stem  # e.g., 'image12' or 'image'
+        if stem.startswith('image'):
+            num_part = stem[5:]
+            try:
+                n = int(num_part) if num_part != '' else 0
+                if n > max_n:
+                    max_n = n
+            except Exception:
+                continue
 
+    new_n = max_n + 1
+    new_name = f"image{new_n}{ext}"
+    dest = Path(app.config['UPLOAD_FOLDER']) / new_name
     file.save(str(dest))
     return redirect(url_for('index'))
 
