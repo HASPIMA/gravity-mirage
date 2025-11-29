@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import io
-import os
 import queue as _queue
 import threading
 import uuid
+from os import getenv
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -1167,17 +1167,46 @@ async def preview(
     return StreamingResponse(io.BytesIO(png), media_type="image/png")
 
 
-def run(port: int | None = None) -> None:
-    """Entry point for web API"""
-    env_port = os.getenv("PORT")
-    if env_port:
+def run(
+    *,
+    port: int | None = None,
+    host: str | None = None,
+    reload: bool = False,
+) -> None:
+    """
+    Start the web server for the Gravity Mirage API.
+
+    This function serves as the entry point for running the web application using uvicorn.
+    It handles port and host configuration, with support for environment variable overrides.
+
+    Args:
+        port: The port number to run the server on (keyword-only).
+            Defaults to the PORT provided (if specified), environment variable if set, otherwise 2025.
+        host: The host address to bind the server to (keyword-only).
+            Defaults to '127.0.0.1' if not specified.
+        reload: Enable auto-reload when code changes are detected (keyword-only).
+            Defaults to False.
+
+    Returns:
+        None
+
+    Example:
+        >>> run()  # Runs on 127.0.0.1:2025
+        >>> run(port=8000, host='0.0.0.0')  # Runs on 0.0.0.0:8000
+        >>> run(reload=True)  # Runs with auto-reload enabled
+    """
+    env_port = getenv("PORT")
+    if env_port and not port:
         port = int(env_port)
     if port is None:
         port = 2025
 
+    if not host:
+        host = "127.0.0.1"
+
     import uvicorn
 
-    uvicorn.run("gravity_mirage.web:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("gravity_mirage.web:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":
