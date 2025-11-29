@@ -2,23 +2,26 @@ from __future__ import annotations
 
 import io
 import os
-from pathlib import Path
-from typing import List
-
-import numpy as np
+import queue as _queue
 import threading
 import uuid
-import queue as _queue
-import time
-from typing import Dict, Optional, Any
+from pathlib import Path
+from typing import Any, Dict, List
+
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from jinja2 import DictLoader, Environment, select_autoescape
 from PIL import Image
 
-from .physics import SchwarzschildBlackHole
-from .ray_tracer import GravitationalRayTracer
+from gravity_mirage.physics import SchwarzschildBlackHole
+from gravity_mirage.ray_tracer import GravitationalRayTracer
 
 # Directory used to persist uploaded assets.
 UPLOAD_FOLDER = Path.cwd() / "uploads"
@@ -1165,7 +1168,7 @@ async def preview(
 
 
 def run(port: int | None = None) -> None:
-    """Entry point used by `python -m gravity_mirage.web`."""
+    """Entry point for web API"""
     env_port = os.getenv("PORT")
     if env_port:
         port = int(env_port)
@@ -1174,7 +1177,7 @@ def run(port: int | None = None) -> None:
 
     import uvicorn
 
-    uvicorn.run("gravity_mirage.web:app", host="127.0.0.1", port=port, reload=False)
+    uvicorn.run("gravity_mirage.web:app", host="0.0.0.0", port=port, reload=False)
 
 
 if __name__ == "__main__":
