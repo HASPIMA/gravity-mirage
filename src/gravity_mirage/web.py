@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
+import threading
+import uuid
+import queue as _queue
+import time
+from typing import Dict, Optional, Any
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
@@ -18,6 +23,9 @@ from .ray_tracer import GravitationalRayTracer
 # Directory used to persist uploaded assets.
 UPLOAD_FOLDER = Path.cwd() / "uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+# Directory for exported GIFs
+EXPORT_FOLDER = Path.cwd() / "exports"
+EXPORT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff", ".webp"}
 ALLOWED_METHODS = {"weak", "geodesic"}
@@ -25,6 +33,71 @@ PREVIEW_WIDTH = 512
 CHUNK_SIZE = 1 << 20  # 1 MiB chunks while streaming uploads to disk.
 
 app = FastAPI(title="Gravity Mirage Web")
+
+# Simple in-memory job queue for GIF exports. This is intentionally lightweight
+# and suitable for development. Jobs are stored in `JOBS` and processed by a
+# background worker thread that writes the generated GIF to `exports/`.
+JOB_QUEUE: _queue.Queue = _queue.Queue()
+JOBS: Dict[str, Dict[str, Any]] = {}
+
+def _gif_worker() -> None:
+    while True:
+        job = JOB_QUEUE.get()
+        if job is None:
+            break
+        job_id = job["id"]
+        try:
+            JOBS[job_id]["status"] = "processing"
+            JOBS[job_id]["progress"] = 0
+
+            path = Path(job["path"]).resolve()
+            with Image.open(path) as src_image:
+                src = src_image.convert("RGB")
+                w0, h0 = src.size
+                aspect = h0 / max(w0, 1)
+                out_w = max(1, int(job.get("width", PREVIEW_WIDTH)))
+                out_h = max(1, int(out_w * aspect))
+                src_small = src.resize((out_w, out_h), Image.Resampling.BILINEAR)
+                src_arr0 = np.array(src_small)
+
+            frames = int(job.get("frames", 24))
+            frames_list = []
+            for i in range(frames):
+                # update a coarse progress indicator
+                JOBS[job_id]["progress"] = int((i / frames) * 100)
+                shift = int(round(i * (out_w / frames)))
+                rolled = np.roll(src_arr0, -shift, axis=1)
+                result_arr = _compute_lensed_array_from_src_arr(
+                    rolled, mass=job.get("mass", 10.0), scale_Rs=job.get("scale", 100.0), method=job.get("method", "weak")
+                )
+                frames_list.append(Image.fromarray(result_arr))
+
+            # Allocate the next sequential export filename (image1.gif, image2.gif, ...)
+            out_file = allocate_export_path(".gif")
+
+            # Save with 20 frames per second (50 ms per frame)
+            frames_list[0].save(
+                out_file,
+                format="GIF",
+                save_all=True,
+                append_images=frames_list[1:],
+                loop=0,
+                duration=50,
+                optimize=False,
+            )
+            JOBS[job_id]["status"] = "done"
+            JOBS[job_id]["result"] = str(out_file.name)
+            JOBS[job_id]["progress"] = 100
+        except Exception as exc:
+            JOBS[job_id]["status"] = "error"
+            JOBS[job_id]["error"] = str(exc)
+        finally:
+            JOB_QUEUE.task_done()
+
+
+# Start worker thread
+_worker_thread = threading.Thread(target=_gif_worker, daemon=True)
+_worker_thread.start()
 
 
 INDEX_TEMPLATE = """
@@ -51,8 +124,8 @@ INDEX_TEMPLATE = """
                 color:#e6eef6;
                 min-height:100vh;
                 display:flex;
-                align-items:center;
-                justify-content:center;
+                align-items:flex-start;
+                justify-content:flex-start;
                 padding:24px;
             }
             .app {
@@ -190,6 +263,10 @@ INDEX_TEMPLATE = """
                 text-align:center;
                 width:100%;
             }
+            /* Left-aligned variant for numeric readouts beneath sliders */
+            .value.value-left {
+                text-align:left;
+            }
             .preview-card {
                 background:rgba(255,255,255,0.02);
                 border-radius:12px;
@@ -249,6 +326,7 @@ INDEX_TEMPLATE = """
                     {%- endif %}
             <aside class="sidebar">
                 <h1>Uploads</h1>
+                <div style="width:100%;"><hr style="border:none; border-top:1px solid rgba(255,255,255,0.06); margin:8px 0 12px 0;" /></div>
                 <div class="uploads-list">
                     <ul>
                         {% for image in images %}
@@ -267,6 +345,34 @@ INDEX_TEMPLATE = """
                         {% endfor %}
                     </ul>
                 </div>
+                <div style="width:100%;"><hr style="border:none; border-top:1px solid rgba(255,255,255,0.06); margin:8px 0 12px 0;" /></div>
+                <div style="display:flex; align-items:center; gap:8px; margin-top:18px; justify-content:center;">
+                    <h1 style="margin:0;">Exports</h1>
+                    <button id="refreshExportsBtn" class="control-button" type="button" style="padding:6px 10px;">Refresh</button>
+                </div>
+                <div style="width:100%;">
+                    <hr style="border:none; border-top:1px solid rgba(255,255,255,0.06); margin:12px 0;" />
+                </div>
+                <div class="uploads-list exports-list">
+                    <ul>
+                        {% for image in exports %}
+                        <li>
+                            <a class="download-btn" href="/exports/{{ image }}" download aria-label="Download {{ image }}" style="position:absolute; top:8px; left:8px; width:24px; height:24px; border-radius:50%; background:#0b4dd8; color:white; display:inline-flex; align-items:center; justify-content:center; text-decoration:none;">↓</a>
+                            <form method="post" action="/delete_export" onsubmit="return confirm('Delete export {{ image }}?');">
+                                <input type="hidden" name="filename" value="{{ image }}" />
+                                <button type="submit" aria-label="Delete {{ image }}">✖</button>
+                            </form>
+                            <button type="button" class="thumb" onclick="openExport('{{ image }}')">
+                                <strong>{{ image }}</strong>
+                                <img src="/exports/{{ image }}" alt="{{ image }}" loading="lazy" />
+                            </button>
+                        </li>
+                        {% else %}
+                        <li class="empty">No exports yet.</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                <div style="width:100%;"><hr style="border:none; border-top:1px solid rgba(255,255,255,0.06); margin:8px 0 12px 0;" /></div>
                 <div class="uploader" style="margin-top:14px; text-align:center;">
                     <form method="post" action="/upload" enctype="multipart/form-data">
                         <label for="fileInput" class="control-button" style="cursor:pointer;">
@@ -279,7 +385,7 @@ INDEX_TEMPLATE = """
                 </div>
             </aside>
             <main class="main">
-                <h2>Black hole preview</h2>
+                <h2>Black hole parameters</h2>
                 <section class="controls">
                     <div>
                         <label for="imageSelect">Image</label>
@@ -299,12 +405,22 @@ INDEX_TEMPLATE = """
                     <div>
                         <label for="massSlider">Mass (M☉)</label>
                         <input id="massSlider" type="range" min="1" max="1000000" step="1" value="10" />
-                        <div class="value" id="massValue">10</div>
+                        <div class="value value-left" id="massValue">10</div>
                     </div>
                     <div>
                         <label for="scaleSlider">Scale (Rs across radius)</label>
                         <input id="scaleSlider" type="range" min="1" max="20" step="1" value="5" />
-                        <div class="value" id="scaleValue">5</div>
+                        <div class="value value-left" id="scaleValue">5</div>
+                    </div>
+                    <div style="display:flex; gap:10px; width:100%; justify-content:left; align-items:center;">
+                        <div style="display:flex; flex-direction:column; align-items:center; text-align:center;">
+                            <label for="framesInput">Frames (GIF)</label>
+                            <div style="font-size:12px; color:#ffffff; margin-top:4px;">(2-2000)</div>
+                        </div>
+                        <input id="framesInput" type="number" min="2" max="2000" step="1" value="24" />
+                        <button id="exportGifBtn" class="control-button" type="button" disabled>Export GIF</button>
+                        <a id="downloadLink" style="display:none; align-self:center;" download>Download GIF</a>
+                        <div id="gifSpinner" style="display:none; color:#ffffff; font-weight:600;">Generating... <span id="gifProgressText"></span></div>
                     </div>
                 </section>
                 <section class="preview-card">
@@ -326,6 +442,10 @@ INDEX_TEMPLATE = """
                 const scaleSlider = doc.getElementById('scaleSlider');
                 const scaleValue = doc.getElementById('scaleValue');
                 const methodSelect = doc.getElementById('methodSelect');
+                const framesInput = doc.getElementById('framesInput');
+                const framesValue = doc.getElementById('framesValue');
+                const exportGifBtn = doc.getElementById('exportGifBtn');
+                const downloadLink = doc.getElementById('downloadLink');
                 const fileInput = doc.getElementById('fileInput');
                 const fileName = doc.getElementById('fileName');
                 const uploadSubmit = doc.getElementById('uploadSubmit');
@@ -365,8 +485,22 @@ INDEX_TEMPLATE = """
                     });
                 }
 
+                if(framesInput && framesValue){
+                    const syncFrames = () => { framesValue.textContent = framesInput.value; };
+                    syncFrames();
+                    framesInput.addEventListener('input', () => syncFrames());
+                }
+
                 if(imageSelect){
                     imageSelect.addEventListener('change', () => setPreview(imageSelect.value));
+                }
+                function updateExportButton(){
+                    if(!exportGifBtn) return;
+                    exportGifBtn.disabled = !(imageSelect && imageSelect.value);
+                }
+                updateExportButton();
+                if(imageSelect){
+                    imageSelect.addEventListener('change', updateExportButton);
                 }
                 wireSlider(massSlider, massValue);
                 wireSlider(scaleSlider, scaleValue);
@@ -400,6 +534,106 @@ INDEX_TEMPLATE = """
                     });
                 }
 
+                function openExport(name){
+                    if(!name) return;
+                    window.open(`/exports/${encodeURIComponent(name)}`, '_blank');
+                }
+
+                async function refreshExports(){
+                    try{
+                        const resp = await fetch('/exports_list');
+                        if(!resp.ok) throw new Error('Failed to fetch');
+                        const data = await resp.json();
+                        const list = data.exports || [];
+                        const container = doc.querySelector('.exports-list ul');
+                        if(!container) return;
+                        if(list.length === 0){
+                            container.innerHTML = '<li class="empty">No exports yet.</li>';
+                            return;
+                        }
+                        const items = list.map(name => `
+                            <li>
+                                <a class="download-btn" href="/exports/${name}" download aria-label="Download ${name}" style="position:absolute; top:8px; left:8px; width:24px; height:24px; border-radius:50%; background:#0b4dd8; color:white; display:inline-flex; align-items:center; justify-content:center; text-decoration:none;">↓</a>
+                                <form method="post" action="/delete_export" onsubmit="return confirm('Delete export ${name}?');">
+                                    <input type="hidden" name="filename" value="${name}" />
+                                    <button type="submit" aria-label="Delete ${name}">✖</button>
+                                </form>
+                                <button type="button" class="thumb" onclick="openExport('${name}')">
+                                    <strong>${name}</strong>
+                                    <img src="/exports/${name}" alt="${name}" loading="lazy" />
+                                </button>
+                            </li>
+                        `).join('');
+                        container.innerHTML = items;
+                    }catch(err){
+                        console.error('refreshExports', err);
+                    }
+                }
+
+                const refreshExportsBtn = doc.getElementById('refreshExportsBtn');
+                if(refreshExportsBtn){
+                    refreshExportsBtn.addEventListener('click', refreshExports);
+                }
+
+                async function exportGif(){
+                    if(!imageSelect || !imageSelect.value) return;
+                    const name = imageSelect.value;
+                    const mass = massSlider ? (massSlider.value || 10) : 10;
+                    const scale = scaleSlider ? (scaleSlider.value || 5) : 5;
+                    const method = methodSelect ? methodSelect.value : 'weak';
+                    const frames = framesInput ? Math.max(2, Math.min(200, parseInt(framesInput.value || '24'))) : 24;
+
+                    exportGifBtn.disabled = true;
+                    downloadLink.style.display = 'none';
+                    const spinner = doc.getElementById('gifSpinner');
+                    const progressText = doc.getElementById('gifProgressText');
+                    if(spinner) spinner.style.display = 'inline-block';
+                    if(progressText) progressText.textContent = '';
+
+                    try{
+                        const qs = `?mass=${encodeURIComponent(mass)}&scale=${encodeURIComponent(scale)}&width=${encodeURIComponent(defaultWidth)}&method=${encodeURIComponent(method)}&frames=${encodeURIComponent(frames)}`;
+                        const resp = await fetch(`/export_gif_async/${encodeURIComponent(name)}${qs}`, { method: 'POST' });
+                        if(!resp.ok){
+                            throw new Error('Queue failed');
+                        }
+                        const data = await resp.json();
+                        const jobId = data.job_id;
+
+                        // Poll status
+                        let done = false;
+                        while(!done){
+                            await new Promise(r => setTimeout(r, 1000));
+                            const st = await fetch(`/export_gif_status/${encodeURIComponent(jobId)}`);
+                            if(!st.ok) throw new Error('Status error');
+                            const js = await st.json();
+                            const status = js.status;
+                            const progress = js.progress || 0;
+                            if(progressText) progressText.textContent = `${progress}%`;
+                            if(status === 'done'){
+                                done = true;
+                                // Do NOT auto-download the generated GIF. Refresh the
+                                // exports list so the user can manually download via
+                                // the per-export download button next to each preview.
+                                try{ if(typeof refreshExports === 'function') await refreshExports(); }catch(e){/*ignore*/}
+                                if(progressText) progressText.textContent = '100%';
+                            } else if(status === 'error'){
+                                throw new Error(js.error || 'Job error');
+                            }
+                        }
+                    }catch(err){
+                        alert('Failed to generate GIF: ' + err.message);
+                        console.error(err);
+                    }finally{
+                        exportGifBtn.disabled = false;
+                        const spinner = doc.getElementById('gifSpinner');
+                        if(spinner) spinner.style.display = 'none';
+                    }
+                }
+
+                if(exportGifBtn){
+                    exportGifBtn.addEventListener('click', exportGif);
+                }
+
                 window.setPreview = setPreview;
 
                 const initial = body ? body.getAttribute('data-first-image') : '';
@@ -426,6 +660,11 @@ def list_uploaded_images() -> List[str]:
     return sorted([f.name for f in UPLOAD_FOLDER.iterdir() if f.is_file()])
 
 
+def list_exported_images() -> List[str]:
+    """Return the filenames that currently exist in the exports directory."""
+    return sorted([f.name for f in EXPORT_FOLDER.iterdir() if f.is_file()])
+
+
 def sanitize_extension(extension: str | None) -> str:
     """Normalize and validate the user-provided extension."""
     if not extension:
@@ -447,11 +686,36 @@ def allocate_image_path(extension: str) -> Path:
     return UPLOAD_FOLDER / f"image{max_index + 1}{extension}"
 
 
+def allocate_export_path(extension: str = ".gif") -> Path:
+    """Pick the next sequential image<N> filename for the exports folder."""
+    max_index = 0
+    for existing in EXPORT_FOLDER.iterdir():
+        if existing.is_file() and existing.stem.startswith("image"):
+            suffix = existing.stem[5:]
+            if suffix.isdigit():
+                max_index = max(max_index, int(suffix))
+    return EXPORT_FOLDER / f"image{max_index + 1}{extension}"
+
+
 def resolve_uploaded_file(filename: str) -> Path:
     """Ensure the requested filename lives inside the uploads folder."""
     clean_name = Path(filename).name
     target = (UPLOAD_FOLDER / clean_name).resolve()
     base = UPLOAD_FOLDER.resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return target
+
+
+def resolve_export_file(filename: str) -> Path:
+    """Ensure the requested filename lives inside the exports folder."""
+    clean_name = Path(filename).name
+    target = (EXPORT_FOLDER / clean_name).resolve()
+    base = EXPORT_FOLDER.resolve()
     try:
         target.relative_to(base)
     except ValueError as exc:
@@ -553,10 +817,219 @@ def render_lensing_image(
     return bio.getvalue()
 
 
+def _compute_lensed_array_from_src_arr(
+    src_arr: np.ndarray,
+    mass: float = 10.0,
+    scale_Rs: float = 100.0,
+    method: str = "weak",
+) -> np.ndarray:
+    """Compute a lensed RGB image array from an already-resized source array.
+
+    src_arr: HxWx3 uint8 RGB array
+    returns: HxWx3 uint8 RGB array with lensing applied
+    """
+    out_h, out_w = src_arr.shape[0], src_arr.shape[1]
+
+    bh = SchwarzschildBlackHole(mass=mass)
+    cx = out_w / 2.0
+    cy = out_h / 2.0
+    ys, xs = np.mgrid[0:out_h, 0:out_w]
+    dx = xs - cx
+    dy = ys - cy
+    r = np.sqrt(dx**2 + dy**2)
+    max_r = max(np.max(r), 1.0)
+
+    Rs = bh.schwarzschild_radius
+    meters_per_pixel = (scale_Rs * Rs) / max_r
+    b = r * meters_per_pixel
+
+    if method == "weak":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            alpha = np.vectorize(bh.deflection_angle_weak_field)(b)
+    else:
+        tracer = GravitationalRayTracer(bh)
+        bins = min(128, max(8, int(max_r)))
+        radii = np.linspace(0, max_r, bins)
+        alpha_bins = np.zeros_like(radii)
+        r0 = max(1e4 * Rs, 1e6)
+
+        for i, rb in enumerate(radii):
+            b_phys = rb * meters_per_pixel
+            dr0 = -1.0
+            dtheta0 = 0.0
+            dphi0 = b_phys / (r0**2 + 1e-30)
+            try:
+                sol = tracer.trace_photon_geodesic(
+                    (r0, np.pi / 2.0, 0.0),
+                    (dr0, dtheta0, dphi0),
+                    lambda_max=max(1e3, float(r0) * 2.0),
+                )
+                y = getattr(sol, "y", None)
+                if y is not None and y.shape[1] > 0:
+                    phi_final = y[3, -1]
+                    alpha_bins[i] = float(abs(phi_final) - np.pi)
+                else:
+                    alpha_bins[i] = 0.0
+            except Exception:
+                alpha_bins[i] = 0.0
+
+        alpha = np.interp(r.flatten(), radii, alpha_bins).reshape(r.shape)
+
+    captured = ~np.isfinite(alpha)
+    theta = np.arctan2(dy, dx)
+    theta_src = theta + alpha
+    src_x = cx + r * np.cos(theta_src)
+    src_y = cy + r * np.sin(theta_src)
+    src_xi = np.clip(np.rint(src_x).astype(int), 0, out_w - 1)
+    src_yi = np.clip(np.rint(src_y).astype(int), 0, out_h - 1)
+
+    result = np.empty_like(src_arr)
+    result[:, :, 0] = src_arr[src_yi, src_xi, 0]
+    result[:, :, 1] = src_arr[src_yi, src_xi, 1]
+    result[:, :, 2] = src_arr[src_yi, src_xi, 2]
+
+    Rs_pixels = Rs / meters_per_pixel
+    mask_disk = (r <= Rs_pixels) | captured
+    result[mask_disk] = 0
+
+    return result
+
+
+@app.get('/export_gif/{filename}')
+async def export_gif(
+    filename: str,
+    mass: float = Query(10.0, gt=0.0),
+    scale: float = Query(100.0, gt=0.0),
+    width: int = Query(PREVIEW_WIDTH, gt=0),
+    method: str = Query('weak'),
+    frames: int = Query(24, ge=2, le=200),
+) -> StreamingResponse:
+    """Generate an animated GIF that scrolls the image right-to-left.
+
+    The scrolling is implemented by rolling the resized source image horizontally
+    across the requested number of frames and applying the lensing renderer
+    to each frame.
+    """
+    clean_method = method.lower()
+    if clean_method not in ALLOWED_METHODS:
+        raise HTTPException(status_code=400, detail='Unsupported render method')
+
+    path = resolve_uploaded_file(filename)
+
+    def _build_gif_bytes():
+        with Image.open(path) as src_image:
+            src = src_image.convert('RGB')
+            w0, h0 = src.size
+            aspect = h0 / max(w0, 1)
+            out_w = max(1, int(width))
+            out_h = max(1, int(out_w * aspect))
+            src_small = src.resize((out_w, out_h), Image.Resampling.BILINEAR)
+            src_arr0 = np.array(src_small)
+
+        frames_list = []
+        # for each frame, roll the image left by a fraction of the width
+        for i in range(frames):
+            shift = int(round(i * (out_w / frames)))
+            rolled = np.roll(src_arr0, -shift, axis=1)
+            result_arr = _compute_lensed_array_from_src_arr(
+                rolled, mass=mass, scale_Rs=scale, method=clean_method
+            )
+            frames_list.append(Image.fromarray(result_arr))
+
+        bio = io.BytesIO()
+        # Save as animated GIF
+        frames_list[0].save(
+            bio,
+            format='GIF',
+            save_all=True,
+            append_images=frames_list[1:],
+            loop=0,
+            # Use 20 frames per second => 50 ms per frame
+            duration=50,
+            optimize=False,
+        )
+        bio.seek(0)
+        return bio.getvalue()
+
+    try:
+        gif_bytes = await run_in_threadpool(_build_gif_bytes)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail='Image not found') from exc
+
+    headers = {"Content-Disposition": f'attachment; filename="{Path(filename).stem}-scroll.gif"'}
+    return StreamingResponse(io.BytesIO(gif_bytes), media_type='image/gif', headers=headers)
+
+
+@app.post('/export_gif_async/{filename}')
+async def export_gif_async(
+    filename: str,
+    mass: float = Query(10.0, gt=0.0),
+    scale: float = Query(100.0, gt=0.0),
+    width: int = Query(PREVIEW_WIDTH, gt=0),
+    method: str = Query('weak'),
+    frames: int = Query(24, ge=2, le=200),
+) -> dict:
+    """Queue a GIF export job and return a job id for polling."""
+    clean_method = method.lower()
+    if clean_method not in ALLOWED_METHODS:
+        raise HTTPException(status_code=400, detail='Unsupported render method')
+
+    path = resolve_uploaded_file(filename)
+
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "path": str(path),
+        "mass": float(mass),
+        "scale": float(scale),
+        "width": int(width),
+        "method": clean_method,
+        "frames": int(frames),
+    }
+    JOB_QUEUE.put(JOBS[job_id])
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get('/export_gif_status/{job_id}')
+async def export_gif_status(job_id: str) -> dict:
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail='Job not found')
+    return {
+        "job_id": job_id,
+        "status": job.get("status", "unknown"),
+        "progress": job.get("progress", 0),
+        "error": job.get("error"),
+    }
+
+
+@app.get('/export_gif_result/{job_id}')
+async def export_gif_result(job_id: str) -> StreamingResponse:
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail='Job not found')
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail='Job not ready')
+    result_name = job.get("result")
+    if not result_name:
+        raise HTTPException(status_code=500, detail='Result missing')
+    result_path = EXPORT_FOLDER / result_name
+    return FileResponse(result_path, media_type='image/gif', filename=result_name)
+
+
+@app.get('/exports_list')
+async def exports_list() -> dict:
+    """Return a JSON listing of files in the exports folder."""
+    return {"exports": list_exported_images()}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     """Render the landing page with the upload + preview UI."""
     images = list_uploaded_images()
+    exports = list_exported_images()
 
     # Prefer a gif placed in ./img/ (repo asset) for the full-page background;
     # fall back to an uploaded copy in the uploads/ folder if present.
@@ -570,6 +1043,7 @@ async def index() -> HTMLResponse:
 
     html = index_template.render(
         images=images,
+        exports=exports,
         first_image=images[0] if images else "",
         preview_width=PREVIEW_WIDTH,
         background_image_url=background_image_url,
@@ -622,11 +1096,37 @@ async def img_file(filename: str) -> FileResponse:
     return FileResponse(target)
 
 
+@app.get("/exports/{filename:path}")
+async def export_file(filename: str) -> FileResponse:
+    """Serve files from the repository's `exports/` directory (generated GIFs)."""
+    # Ensure we don't allow path traversal outside the exports directory.
+    export_base = EXPORT_FOLDER.resolve()
+    target = (export_base / Path(filename).name).resolve()
+    try:
+        target.relative_to(export_base)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, media_type='image/gif')
+
+
 @app.post("/delete")
 async def delete(filename: str = Form(...)) -> RedirectResponse:
     """Remove an uploaded asset."""
     try:
         path = resolve_uploaded_file(filename)
+    except HTTPException:
+        return RedirectResponse("/", status_code=303)
+    path.unlink(missing_ok=True)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/delete_export")
+async def delete_export(filename: str = Form(...)) -> RedirectResponse:
+    """Remove an exported GIF."""
+    try:
+        path = resolve_export_file(filename)
     except HTTPException:
         return RedirectResponse("/", status_code=303)
     path.unlink(missing_ok=True)
@@ -670,7 +1170,7 @@ def run(port: int | None = None) -> None:
     if env_port:
         port = int(env_port)
     if port is None:
-        port = 8000
+        port = 2025
 
     import uvicorn
 
