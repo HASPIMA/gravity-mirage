@@ -1009,7 +1009,7 @@ async def export_gif_status(job_id: str) -> dict:
 
 
 @app.get('/export_gif_result/{job_id}')
-async def export_gif_result(job_id: str) -> StreamingResponse:
+async def export_gif_result(job_id: str) -> FileResponse:
     job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail='Job not found')
