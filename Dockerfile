@@ -36,6 +36,9 @@ USER nonroot
 # Use `/app` as the working directory
 WORKDIR /app
 
+# Remove uv-related files since they are not required anymore
+RUN rm -rf pyproject.toml uv.lock
+
 EXPOSE 8080
 
 # Run the FastAPI application by using the script specified in `pyproject.toml`
