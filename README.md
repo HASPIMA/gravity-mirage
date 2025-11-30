@@ -57,17 +57,24 @@ Then access the application at `http://localhost:3000`.
 
 #### Development mode with volume mounting
 
+> [!TIP]
+> You may add the `--rm` argument to make the container ephemeral.
+
 To mount the source code for development:
 
 ```sh
-docker run -p 8080:8080 -v $(pwd):/app gravity-mirage
+docker run -p 8080:8080 -v $(pwd)/src:/app/src gravity-mirage
 ```
 
 > [!IMPORTANT]
-> You may want to add the `reload`
+> You may want to add the `--reload`
 > [command-line option](#available-command-line-options) to
 > the [Dockerfile](./Dockerfile) to automatically reload the server on
-> code change
+> code change. Like so:
+
+```Dockerfile
+CMD ["gravity-mirage", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+```
 
 ### Local development
 
