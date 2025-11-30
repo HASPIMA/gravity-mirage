@@ -476,7 +476,7 @@ INDEX_TEMPLATE = """
 
                 async function refreshExports(){
                     try{
-                        const resp = await fetch('/exports_list');
+                        const resp = await fetch('/exports/list');
                         if(!resp.ok) throw new Error('Failed to fetch');
                         const data = await resp.json();
                         const list = data.exports || [];
@@ -527,7 +527,7 @@ INDEX_TEMPLATE = """
 
                     try{
                         const qs = `?mass=${encodeURIComponent(mass)}&scale=${encodeURIComponent(scale)}&width=${encodeURIComponent(defaultWidth)}&method=${encodeURIComponent(method)}&frames=${encodeURIComponent(frames)}`;
-                        const resp = await fetch(`/export_gif_async/${encodeURIComponent(name)}${qs}`, { method: 'POST' });
+                        const resp = await fetch(`/exports/gif/async/${encodeURIComponent(name)}${qs}`, { method: 'POST' });
                         if(!resp.ok){
                             throw new Error('Queue failed');
                         }
@@ -538,7 +538,7 @@ INDEX_TEMPLATE = """
                         let done = false;
                         while(!done){
                             await new Promise(r => setTimeout(r, 1000));
-                            const st = await fetch(`/export_gif_status/${encodeURIComponent(jobId)}`);
+                            const st = await fetch(`/exports/gif/status/${encodeURIComponent(jobId)}`);
                             if(!st.ok) throw new Error('Status error');
                             const js = await st.json();
                             const status = js.status;
