@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import io
-import queue as _queue
 import threading
 import uuid
 from importlib.metadata import version
 from os import getenv
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -21,10 +20,11 @@ from fastapi.responses import (
 from jinja2 import DictLoader, Environment, select_autoescape
 from PIL import Image
 
-from gravity_mirage.physics import SchwarzschildBlackHole
-from gravity_mirage.ray_tracer import GravitationalRayTracer
+from gravity_mirage.core.lensing import (
+    compute_lensed_array_from_src_arr,
+    render_lensing_image,
+)
 from gravity_mirage.utils.files import (
-    allocate_export_path,
     allocate_image_path,
     list_exported_images,
     list_uploaded_images,
@@ -40,79 +40,16 @@ from gravity_mirage.web.constants import (
     PREVIEW_WIDTH,
     UPLOAD_FOLDER,
 )
+from gravity_mirage.web.workers import JOB_QUEUE, JOBS
+from gravity_mirage.web.workers.gif import worker as worker_gif
 
 app = FastAPI(
     title="Gravity Mirage Web",
     version=version("gravity_mirage"),
 )
 
-# Simple in-memory job queue for GIF exports. This is intentionally lightweight
-# and suitable for development. Jobs are stored in `JOBS` and processed by a
-# background worker thread that writes the generated GIF to `exports/`.
-JOB_QUEUE: _queue.Queue = _queue.Queue()
-JOBS: dict[str, dict[str, Any]] = {}
-
-
-def _gif_worker() -> None:
-    while True:
-        job = JOB_QUEUE.get()
-        if job is None:
-            break
-        job_id = job["id"]
-        try:
-            JOBS[job_id]["status"] = "processing"
-            JOBS[job_id]["progress"] = 0
-
-            path = Path(job["path"]).resolve()
-            with Image.open(path) as src_image:
-                src = src_image.convert("RGB")
-                w0, h0 = src.size
-                aspect = h0 / max(w0, 1)
-                out_w = max(1, int(job.get("width", PREVIEW_WIDTH)))
-                out_h = max(1, int(out_w * aspect))
-                src_small = src.resize((out_w, out_h), Image.Resampling.BILINEAR)
-                src_arr0 = np.array(src_small)
-
-            frames = int(job.get("frames", 24))
-            frames_list: list[Image.Image] = []
-            for i in range(frames):
-                # update a coarse progress indicator
-                JOBS[job_id]["progress"] = (i // frames) * 100
-                shift = round(i * (out_w / frames))
-                rolled = np.roll(src_arr0, -shift, axis=1)
-                result_arr = _compute_lensed_array_from_src_arr(
-                    rolled,
-                    mass=job.get("mass", 10.0),
-                    scale_Rs=job.get("scale", 100.0),
-                    method=job.get("method", "weak"),
-                )
-                frames_list.append(Image.fromarray(result_arr))
-
-            # Allocate the next sequential export filename (image1.gif, image2.gif, ...)
-            out_file = allocate_export_path(".gif")
-
-            # Save with 20 frames per second (50 ms per frame)
-            frames_list[0].save(
-                out_file,
-                format="GIF",
-                save_all=True,
-                append_images=frames_list[1:],
-                loop=0,
-                duration=50,
-                optimize=False,
-            )
-            JOBS[job_id]["status"] = "done"
-            JOBS[job_id]["result"] = str(out_file.name)
-            JOBS[job_id]["progress"] = 100
-        except (OSError, ValueError, RuntimeError) as exc:
-            JOBS[job_id]["status"] = "error"
-            JOBS[job_id]["error"] = str(exc)
-        finally:
-            JOB_QUEUE.task_done()
-
-
 # Start worker thread
-_worker_thread = threading.Thread(target=_gif_worker, daemon=True)
+_worker_thread = threading.Thread(target=worker_gif, daemon=True)
 _worker_thread.start()
 
 
@@ -121,177 +58,6 @@ template_env = Environment(
     autoescape=select_autoescape(["html", "xml"]),
 )
 index_template = template_env.get_template("index.html")
-
-
-def render_lensing_image(
-    src_path: Path,
-    mass: float = 10.0,
-    scale_Rs: float = 100.0,
-    out_width: int = PREVIEW_WIDTH,
-    method: str = "weak",
-) -> bytes:
-    """Render a PNG preview that visualizes gravitational lensing."""
-    if not src_path.exists():
-        raise FileNotFoundError(src_path)
-
-    with Image.open(src_path) as src_image:
-        src = src_image.convert("RGB")
-        w0, h0 = src.size
-        aspect = h0 / max(w0, 1)
-        out_w = max(1, int(out_width))
-        out_h = max(1, int(out_w * aspect))
-        src_small = src.resize((out_w, out_h), Image.Resampling.BILINEAR)
-        src_arr = np.array(src_small)
-
-    bh = SchwarzschildBlackHole(mass=mass)
-    cx = out_w / 2.0
-    cy = out_h / 2.0
-    ys, xs = np.mgrid[0:out_h, 0:out_w]
-    dx = xs - cx
-    dy = ys - cy
-    r = np.sqrt(dx**2 + dy**2)
-    max_r = max(np.max(r), 1.0)
-
-    Rs = bh.schwarzschild_radius
-    meters_per_pixel = (scale_Rs * Rs) / max_r
-    b = r * meters_per_pixel
-
-    if method == "weak":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            alpha = np.vectorize(bh.deflection_angle_weak_field)(b)
-    else:
-        tracer = GravitationalRayTracer(bh)
-        bins = min(128, max(8, int(max_r)))
-        radii = np.linspace(0, max_r, bins)
-        alpha_bins = np.zeros_like(radii)
-        r0 = max(1e4 * Rs, 1e6)
-
-        for i, rb in enumerate(radii):
-            b_phys = rb * meters_per_pixel
-            dr0 = -1.0
-            dtheta0 = 0.0
-            dphi0 = b_phys / (r0**2 + 1e-30)
-            try:
-                # Allow integration long enough for the photon to escape back
-                # to large radius. The tracer now supports stopping at the
-                # escape event, so a large lambda_max is acceptable.
-                sol = tracer.trace_photon_geodesic(
-                    (r0, np.pi / 2.0, 0.0),
-                    (dr0, dtheta0, dphi0),
-                    lambda_max=max(1e3, float(r0) * 2.0),
-                )
-                y = getattr(sol, "y", None)
-                if y is not None and y.shape[1] > 0:
-                    phi_final = y[3, -1]
-                    alpha_bins[i] = float(abs(phi_final) - np.pi)
-                else:
-                    alpha_bins[i] = 0.0
-            except Exception:
-                alpha_bins[i] = 0.0
-
-        alpha = np.interp(r.flatten(), radii, alpha_bins).reshape(r.shape)
-
-    captured = ~np.isfinite(alpha)
-    theta = np.arctan2(dy, dx)
-    theta_src = theta + alpha
-    src_x = cx + r * np.cos(theta_src)
-    src_y = cy + r * np.sin(theta_src)
-    src_xi = np.clip(np.rint(src_x).astype(int), 0, out_w - 1)
-    src_yi = np.clip(np.rint(src_y).astype(int), 0, out_h - 1)
-
-    result = np.empty_like(src_arr)
-    result[:, :, 0] = src_arr[src_yi, src_xi, 0]
-    result[:, :, 1] = src_arr[src_yi, src_xi, 1]
-    result[:, :, 2] = src_arr[src_yi, src_xi, 2]
-
-    Rs_pixels = Rs / meters_per_pixel
-    mask_disk = (r <= Rs_pixels) | captured
-    result[mask_disk] = 0
-
-    out_img = Image.fromarray(result)
-    bio = io.BytesIO()
-    out_img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio.getvalue()
-
-
-def _compute_lensed_array_from_src_arr(
-    src_arr: np.ndarray,
-    mass: float = 10.0,
-    scale_Rs: float = 100.0,
-    method: str = "weak",
-) -> np.ndarray:
-    """
-    Compute a lensed RGB image array from an already-resized source array.
-
-    src_arr: HxWx3 uint8 RGB array
-    returns: HxWx3 uint8 RGB array with lensing applied
-    """
-    out_h, out_w = src_arr.shape[0], src_arr.shape[1]
-
-    bh = SchwarzschildBlackHole(mass=mass)
-    cx = out_w / 2.0
-    cy = out_h / 2.0
-    ys, xs = np.mgrid[0:out_h, 0:out_w]
-    dx = xs - cx
-    dy = ys - cy
-    r = np.sqrt(dx**2 + dy**2)
-    max_r = max(np.max(r), 1.0)
-
-    Rs = bh.schwarzschild_radius
-    meters_per_pixel = (scale_Rs * Rs) / max_r
-    b = r * meters_per_pixel
-
-    if method == "weak":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            alpha = np.vectorize(bh.deflection_angle_weak_field)(b)
-    else:
-        tracer = GravitationalRayTracer(bh)
-        bins = min(128, max(8, int(max_r)))
-        radii = np.linspace(0, max_r, bins)
-        alpha_bins = np.zeros_like(radii)
-        r0 = max(1e4 * Rs, 1e6)
-
-        for i, rb in enumerate(radii):
-            b_phys = rb * meters_per_pixel
-            dr0 = -1.0
-            dtheta0 = 0.0
-            dphi0 = b_phys / (r0**2 + 1e-30)
-            try:
-                sol = tracer.trace_photon_geodesic(
-                    (r0, np.pi / 2.0, 0.0),
-                    (dr0, dtheta0, dphi0),
-                    lambda_max=max(1e3, float(r0) * 2.0),
-                )
-                y = getattr(sol, "y", None)
-                if y is not None and y.shape[1] > 0:
-                    phi_final = y[3, -1]
-                    alpha_bins[i] = float(abs(phi_final) - np.pi)
-                else:
-                    alpha_bins[i] = 0.0
-            except (ValueError, RuntimeError):
-                alpha_bins[i] = 0.0
-
-        alpha = np.interp(r.flatten(), radii, alpha_bins).reshape(r.shape)
-
-    captured = ~np.isfinite(alpha)
-    theta = np.arctan2(dy, dx)
-    theta_src = theta + alpha
-    src_x = cx + r * np.cos(theta_src)
-    src_y = cy + r * np.sin(theta_src)
-    src_xi = np.clip(np.rint(src_x).astype(int), 0, out_w - 1)
-    src_yi = np.clip(np.rint(src_y).astype(int), 0, out_h - 1)
-
-    result = np.empty_like(src_arr)
-    result[:, :, 0] = src_arr[src_yi, src_xi, 0]
-    result[:, :, 1] = src_arr[src_yi, src_xi, 1]
-    result[:, :, 2] = src_arr[src_yi, src_xi, 2]
-
-    Rs_pixels = Rs / meters_per_pixel
-    mask_disk = (r <= Rs_pixels) | captured
-    result[mask_disk] = 0
-
-    return result
 
 
 @app.get("/export_gif/{filename}")
@@ -331,10 +97,10 @@ async def export_gif(
         for i in range(frames):
             shift = round(i * (out_w / frames))
             rolled = np.roll(src_arr0, -shift, axis=1)
-            result_arr = _compute_lensed_array_from_src_arr(
+            result_arr = compute_lensed_array_from_src_arr(
                 rolled,
                 mass=mass,
-                scale_Rs=scale,
+                scale_rs=scale,
                 method=clean_method,
             )
             frames_list.append(Image.fromarray(result_arr))
@@ -612,7 +378,7 @@ def run(
     if not host:
         host = "127.0.0.1"
 
-    import uvicorn
+    import uvicorn  # noqa: PLC0415
 
     uvicorn.run("gravity_mirage.web:app", host=host, port=port, reload=reload)
 
