@@ -12,7 +12,7 @@ def main() -> None:
 
     Parses command-line arguments and starts the web server.
     """
-    import argparse
+    import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(
         "gravity-mirage",
@@ -22,8 +22,8 @@ def main() -> None:
     parser.add_argument(
         "--host",
         type=str,
-        default="0.0.0.0",
-        help="Host to run the web server on (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help="Host to run the web server on (default: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",
