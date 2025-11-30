@@ -8,9 +8,9 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
-from jinja2 import DictLoader, Environment, select_autoescape
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from gravity_mirage.web.constants import INDEX_TEMPLATE, PREVIEW_WIDTH, UPLOAD_FOLDER
+from gravity_mirage.web.constants import PREVIEW_WIDTH, UPLOAD_FOLDER
 from gravity_mirage.web.routers import api_router
 from gravity_mirage.web.utils.files import list_exported_images, list_uploaded_images
 from gravity_mirage.web.workers.gif import worker as worker_gif
@@ -28,8 +28,10 @@ _worker_thread = threading.Thread(target=worker_gif, daemon=True)
 _worker_thread.start()
 
 
+# Set up Jinja2 template environment
+templates_dir = Path(__file__).parent / "templates"
 template_env = Environment(
-    loader=DictLoader({"index.html": INDEX_TEMPLATE}),
+    loader=FileSystemLoader(templates_dir),
     autoescape=select_autoescape(["html", "xml"]),
 )
 index_template = template_env.get_template("index.html")
@@ -49,7 +51,7 @@ async def index() -> HTMLResponse:
         background_image_url = f"/api/img/{img_file.name}"
     else:
         bg_file = UPLOAD_FOLDER / "nasa-black-hole-visualization.gif"
-        background_image_url = f"/uploads/{bg_file.name}" if bg_file.exists() else ""
+        background_image_url = f"/api/uploads/{bg_file.name}" if bg_file.exists() else ""
 
     html = index_template.render(
         images=images,
