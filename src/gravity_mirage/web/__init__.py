@@ -16,11 +16,6 @@ from jinja2 import DictLoader, Environment, select_autoescape
 from PIL import Image
 
 from gravity_mirage.core.lensing import compute_lensed_array_from_src_arr
-from gravity_mirage.utils.files import (
-    list_exported_images,
-    list_uploaded_images,
-    resolve_uploaded_file,
-)
 from gravity_mirage.web.constants import (
     ALLOWED_METHODS,
     EXPORT_FOLDER,
@@ -29,6 +24,11 @@ from gravity_mirage.web.constants import (
     UPLOAD_FOLDER,
 )
 from gravity_mirage.web.routers import api_router
+from gravity_mirage.web.utils.files import (
+    list_exported_images,
+    list_uploaded_images,
+    resolve_uploaded_file,
+)
 from gravity_mirage.web.workers import JOB_QUEUE, JOBS
 from gravity_mirage.web.workers.gif import worker as worker_gif
 

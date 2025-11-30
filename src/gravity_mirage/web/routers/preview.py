@@ -6,8 +6,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
 from gravity_mirage.core.lensing import render_lensing_image
-from gravity_mirage.utils.files import resolve_uploaded_file
 from gravity_mirage.web.constants import ALLOWED_METHODS, PREVIEW_WIDTH
+from gravity_mirage.web.utils.files import resolve_uploaded_file
 
 router = APIRouter(
     prefix="/preview",

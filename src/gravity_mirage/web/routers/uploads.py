@@ -4,12 +4,12 @@ from typing import Annotated
 from fastapi import APIRouter, File, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse
 
-from gravity_mirage.utils.files import (
+from gravity_mirage.web.constants import CHUNK_SIZE
+from gravity_mirage.web.utils.files import (
     allocate_image_path,
     resolve_uploaded_file,
     sanitize_extension,
 )
-from gravity_mirage.web.constants import CHUNK_SIZE
 
 router = APIRouter(
     prefix="/uploads",

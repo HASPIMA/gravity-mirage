@@ -4,8 +4,8 @@ import numpy as np
 from PIL import Image
 
 from gravity_mirage.core.lensing import compute_lensed_array_from_src_arr
-from gravity_mirage.utils.files import allocate_export_path
 from gravity_mirage.web.constants import PREVIEW_WIDTH
+from gravity_mirage.web.utils.files import allocate_export_path
 from gravity_mirage.web.workers import JOB_QUEUE, JOBS
 
 

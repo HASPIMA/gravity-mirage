@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, HTTPException, status
 from fastapi.responses import RedirectResponse
 
-from gravity_mirage.utils.files import resolve_export_file, resolve_uploaded_file
+from gravity_mirage.web.utils.files import resolve_export_file, resolve_uploaded_file
 
 router = APIRouter(
     prefix="/delete",
