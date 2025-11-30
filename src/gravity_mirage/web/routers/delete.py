@@ -7,6 +7,7 @@ from gravity_mirage.web.utils.files import resolve_export_file, resolve_uploaded
 
 router = APIRouter(
     prefix="/delete",
+    tags=["delete"],
 )
 
 

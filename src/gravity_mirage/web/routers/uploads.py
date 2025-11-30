@@ -13,6 +13,7 @@ from gravity_mirage.web.utils.files import (
 
 router = APIRouter(
     prefix="/uploads",
+    tags=["uploads"],
 )
 
 
